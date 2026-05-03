@@ -29,7 +29,6 @@ def save_config(data):
 async def on_ready():
     await bot.load_extension("cogs.league")
     await bot.load_extension("cogs.application")
-    bot.tree.clear_commands(guild=None)
     await bot.tree.sync()
     print(f"✅ Bot online as {bot.user} (ID: {bot.user.id})")
 
