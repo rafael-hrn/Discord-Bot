@@ -29,11 +29,11 @@ def save_config(data):
 async def on_ready():
     await bot.load_extension("cogs.league")
     await bot.load_extension("cogs.application")
-    bot.tree.clear_commands(guild=None)
-    await bot.tree.sync()
     guild = discord.Object(id=600172398045560842)
+    bot.tree.clear_commands(guild=guild)
     bot.tree.copy_global_to(guild=guild)
-    await bot.tree.sync(guild=guild)
+    synced = await bot.tree.sync(guild=guild)
     print(f"✅ Bot online as {bot.user} (ID: {bot.user.id})")
+    print(f"✅ Synced {len(synced)} commands to guild.")
 
 bot.run(TOKEN)
