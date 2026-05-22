@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands
-import json, os
+import json, os, asyncio
 
 # ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -46,7 +46,7 @@ class ApplicationModal(discord.ui.Modal):
         self.league_name = league_name
 
     async def on_submit(self, interaction: discord.Interaction):
-        from settings import SCREENSHOT_CHANNEL_ID
+        from settings import SCREENSHOT_CHANNEL_ID, APPLICANT_ROLE_ID
 
         self.interaction_data = {
             "ign": self.ign.value,
@@ -63,18 +63,29 @@ class ApplicationModal(discord.ui.Modal):
             )
             return
 
+        # Grant applicant role so they can see the screenshot channel
+        applicant = interaction.user
+        role_granted = False
+        if APPLICANT_ROLE_ID:
+            role = interaction.guild.get_role(APPLICANT_ROLE_ID)
+            if role and role not in applicant.roles:
+                try:
+                    await applicant.add_roles(role, reason="Applying to league — screenshot access")
+                    role_granted = True
+                except discord.Forbidden:
+                    pass
+
         await interaction.response.send_message(
             f"✅ Almost done! Head over to {screenshot_channel.mention} and send your screenshot.",
             ephemeral=True,
         )
 
         prompt_msg = await screenshot_channel.send(
-            f"{interaction.user.mention}\n"
+            f"{applicant.mention}\n"
             "• To complete your application, send a screenshot of your roster in this channel right now. "
             "Make sure your **name** and **threat value** are visible.\n"
             "• Your application will be reviewed once we receive your roster image. "
-            "You have **10 minutes** to send the image.\n"
-            "• This message will be deleted after you send the screenshot."
+            "You have **10 minutes** to send the image."
         )
 
         # Collect ALL images sent by the applicant within 10 minutes
@@ -82,7 +93,7 @@ class ApplicationModal(discord.ui.Modal):
 
         def check(m: discord.Message):
             return (
-                m.author.id == interaction.user.id
+                m.author.id == applicant.id
                 and m.channel.id == screenshot_channel.id
                 and len(m.attachments) > 0
                 and m.attachments[0].content_type
@@ -96,14 +107,20 @@ class ApplicationModal(discord.ui.Modal):
         except Exception:
             await prompt_msg.delete()
             await screenshot_channel.send(
-                f"{interaction.user.mention} ⏰ Time expired! Your application was cancelled. "
-                "Click the Apply button again to retry.",
-                delete_after=15,
+                f"{applicant.mention} ⏰ Time expired! Your application was cancelled. "
+                "Click the Apply button again to retry."
             )
+            # Remove applicant role if it was granted
+            if role_granted:
+                try:
+                    role = interaction.guild.get_role(APPLICANT_ROLE_ID)
+                    if role:
+                        await applicant.remove_roles(role, reason="Application timed out")
+                except Exception:
+                    pass
             return
 
         # Give a short window (15s) to collect any additional screenshots
-        import asyncio
         try:
             while True:
                 extra = await asyncio.wait_for(
@@ -112,9 +129,9 @@ class ApplicationModal(discord.ui.Modal):
                 )
                 collected_images.append(extra)
         except asyncio.TimeoutError:
-            pass  # No more images, proceed
+            pass
 
-        # Collect all image URLs before deleting the messages
+        # Collect all image URLs
         image_urls = []
         for m in collected_images:
             for att in m.attachments:
@@ -123,13 +140,12 @@ class ApplicationModal(discord.ui.Modal):
 
         await prompt_msg.delete()
 
-        await self._submit_application(interaction, screenshot_channel, collected_images, image_urls)
+        await self._submit_application(interaction, screenshot_channel, image_urls)
 
     async def _submit_application(
         self,
         interaction: discord.Interaction,
         screenshot_channel: discord.TextChannel,
-        screenshot_messages: list[discord.Message],
         image_urls: list[str],
     ):
         cfg = load_config()
@@ -139,28 +155,21 @@ class ApplicationModal(discord.ui.Modal):
         reviewer_role_id = league.get("reviewer_role")
 
         if not review_channel_id:
-            for m in screenshot_messages:
-                await m.delete()
             await screenshot_channel.send(
-                f"{interaction.user.mention} ❌ Review channel not configured. Contact an administrator.",
-                delete_after=15,
+                f"{interaction.user.mention} ❌ Review channel not configured. Contact an administrator."
             )
             return
 
         review_channel = interaction.guild.get_channel(review_channel_id)
         if not review_channel:
-            for m in screenshot_messages:
-                await m.delete()
             await screenshot_channel.send(
-                f"{interaction.user.mention} ❌ Review channel not found. Contact an administrator.",
-                delete_after=15,
+                f"{interaction.user.mention} ❌ Review channel not found. Contact an administrator."
             )
             return
 
         applicant = interaction.user
         d = self.interaction_data
 
-        # Main application embed — first image as embed image
         embed = discord.Embed(
             title=f"{self.league_name}",
             description=(
@@ -183,39 +192,30 @@ class ApplicationModal(discord.ui.Modal):
 
         reviewer_mention = f"<@&{reviewer_role_id}>" if reviewer_role_id else ""
 
-        # Store screenshot message IDs so they can be deleted after decision
-        screenshot_msg_ids = [
-            {"channel": screenshot_channel.id, "message": m.id}
-            for m in screenshot_messages
-        ]
-
         view = ReviewView(
             applicant_id=applicant.id,
             league_id=self.league_id,
             league_name=self.league_name,
             screenshot_channel_id=screenshot_channel.id,
-            screenshot_msg_ids=screenshot_msg_ids,
         )
 
-        review_msg = await review_channel.send(
+        await review_channel.send(
             content=f"{reviewer_mention} — New application received!",
             embed=embed,
             view=view,
         )
 
-        # Send any extra screenshots as follow-up messages in the review channel
+        # Send extra screenshots as follow-up embeds in review channel
         for url in image_urls[1:]:
             extra_embed = discord.Embed(color=discord.Color.gold())
             extra_embed.set_image(url=url)
             extra_embed.set_footer(text=f"Additional screenshot — {applicant.display_name}")
             await review_channel.send(embed=extra_embed)
 
-        # Confirmation in screenshot channel — screenshots remain visible until decision
+        # Confirmation in screenshot channel
         await screenshot_channel.send(
-            f"{applicant.mention} ✅ Your application to **{self.league_name}** has been submitted!\n"
-            "• Please wait for the leaders to review it. You will be notified once a decision is made.\n"
-            "• This message will be deleted in 30 seconds.",
-            delete_after=30,
+            f"{applicant.mention} ✅ Your application to **{self.league_name}** has been submitted! "
+            "Please wait for the leaders to review it. You will be notified once a decision is made."
         )
 
 
@@ -228,14 +228,12 @@ class ReviewView(discord.ui.View):
         league_id: str,
         league_name: str,
         screenshot_channel_id: int,
-        screenshot_msg_ids: list[dict],
     ):
         super().__init__(timeout=None)
         self.applicant_id = applicant_id
         self.league_id = league_id
         self.league_name = league_name
         self.screenshot_channel_id = screenshot_channel_id
-        self.screenshot_msg_ids = screenshot_msg_ids  # [{"channel": id, "message": id}, ...]
 
     async def _has_permission(self, interaction: discord.Interaction) -> bool:
         cfg = load_config()
@@ -255,16 +253,17 @@ class ReviewView(discord.ui.View):
         original_embed.color = color
         return original_embed
 
-    async def _delete_screenshots(self, guild: discord.Guild):
-        """Delete all applicant screenshots from the screenshot channel."""
-        for loc in self.screenshot_msg_ids:
+    async def _remove_applicant_role(self, guild: discord.Guild, applicant: discord.Member):
+        """Remove applicant role after decision is made."""
+        from settings import APPLICANT_ROLE_ID
+        if not APPLICANT_ROLE_ID:
+            return
+        role = guild.get_role(APPLICANT_ROLE_ID)
+        if role and role in applicant.roles:
             try:
-                ch = guild.get_channel(loc["channel"])
-                if ch:
-                    msg = await ch.fetch_message(loc["message"])
-                    await msg.delete()
+                await applicant.remove_roles(role, reason="Application decided")
             except Exception as e:
-                print(f"[WARN] Could not delete screenshot message: {e}")
+                print(f"[WARN] Could not remove applicant role: {e}")
 
     @discord.ui.button(label="✅ Accept", style=discord.ButtonStyle.success, custom_id="review_accept")
     async def accept(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -308,23 +307,19 @@ class ReviewView(discord.ui.View):
             child.disabled = True
         await interaction.message.edit(embed=decided_embed, view=self)
 
-        # Delete screenshots now that decision is made
-        await self._delete_screenshots(interaction.guild)
+        # Remove applicant role
+        await self._remove_applicant_role(interaction.guild, applicant)
 
-        # Notify applicant in screenshot channel
+        # Notify in screenshot channel
         screenshot_channel = interaction.guild.get_channel(self.screenshot_channel_id)
         accept_msg = (
-            f"{applicant.mention}, your application to **{self.league_name}** has been **accepted**!\n"
-            f"• Welcome to the team! An officer will introduce you the league channels very soon. If you need help, contact the leader."
+            f"{applicant.mention} Your application to **{self.league_name}** has been **accepted**!\n"
             f"📋 League Code: `{league_code}`\n"
+            "• Welcome to the team! An officer will introduce you to the league channels very soon. "
+            "If you need help, contact the leader."
         )
         if screenshot_channel:
             await screenshot_channel.send(accept_msg)
-        else:
-            try:
-                await applicant.send(accept_msg)
-            except discord.Forbidden:
-                pass
 
         await interaction.response.send_message(
             f"✅ Application accepted.{role_warning}", ephemeral=True
@@ -340,7 +335,6 @@ class ReviewView(discord.ui.View):
             league_name=self.league_name,
             league_id=self.league_id,
             screenshot_channel_id=self.screenshot_channel_id,
-            screenshot_msg_ids=self.screenshot_msg_ids,
             parent_view=self,
         ))
 
@@ -360,7 +354,6 @@ class RejectModal(discord.ui.Modal, title="Reason for Rejection"):
         league_name: str,
         league_id: str,
         screenshot_channel_id: int,
-        screenshot_msg_ids: list[dict],
         parent_view: ReviewView,
     ):
         super().__init__()
@@ -368,7 +361,6 @@ class RejectModal(discord.ui.Modal, title="Reason for Rejection"):
         self.league_name = league_name
         self.league_id = league_id
         self.screenshot_channel_id = screenshot_channel_id
-        self.screenshot_msg_ids = screenshot_msg_ids
         self.parent_view = parent_view
 
     async def on_submit(self, interaction: discord.Interaction):
@@ -385,29 +377,20 @@ class RejectModal(discord.ui.Modal, title="Reason for Rejection"):
             child.disabled = True
         await interaction.message.edit(embed=decided_embed, view=self.parent_view)
 
-        # Delete screenshots now that decision is made
-        await self.parent_view._delete_screenshots(interaction.guild)
+        # Remove applicant role
+        if applicant:
+            await self.parent_view._remove_applicant_role(interaction.guild, applicant)
 
+        # Send rejection message in screenshot channel
         reject_msg = (
             f"{applicant.mention if applicant else 'Applicant'} "
-            f"Unfortunately your application to **{self.league_name}** has been **rejected**.\n"
-            + (f"• **Reason:** {reason_text}\n" if reason_text else "")
-            + "• You may try for another league or try again in the future!"
+            f"Unfortunately your application to **{self.league_name}** has been **rejected**."
+            + (f"\n**Reason:** {reason_text}" if reason_text else "")
+            + "\nYou may try another league or try again in the future!"
         )
-
-        # Try DM first, fall back to screenshot channel
-        dm_sent = False
-        if applicant:
-            try:
-                await applicant.send(reject_msg)
-                dm_sent = True
-            except discord.Forbidden:
-                pass
-
-        if not dm_sent:
-            screenshot_channel = interaction.guild.get_channel(self.screenshot_channel_id)
-            if screenshot_channel:
-                await screenshot_channel.send(reject_msg, delete_after=30)
+        screenshot_channel = interaction.guild.get_channel(self.screenshot_channel_id)
+        if screenshot_channel:
+            await screenshot_channel.send(reject_msg)
 
         await interaction.response.send_message("❌ Application rejected.", ephemeral=True)
 
