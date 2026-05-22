@@ -2,10 +2,11 @@
 # settings.py — Edit your bot settings here
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ID of the channel where applicants will send their roster screenshot.
-# How to get the ID:
-#   1. Go to Discord Settings → Advanced → Enable Developer Mode
-#   2. Right-click the channel → "Copy ID"
-#   3. Paste it below, replacing the number
+# Channel where applicants send their roster screenshot.
+# Right-click the channel in Discord → Copy ID
+SCREENSHOT_CHANNEL_ID = 123456789012345678  # ← replace with your real channel ID
 
-SCREENSHOT_CHANNEL_ID = 1285353145534513212  # ← replace with your real channel ID
+# Role given to the applicant so they can see the screenshot channel.
+# Right-click the role in Server Settings → Copy ID
+# Set to None to disable this feature.
+APPLICANT_ROLE_ID = 123456789012345678  # ← replace with your real role ID
